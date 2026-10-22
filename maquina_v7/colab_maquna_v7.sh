@@ -171,18 +171,28 @@ fi
 # Create state and socket directories
 sudo mkdir -p /var/lib/tailscale /run/tailscale
 
+# Kill any stale tailscaled from a previous cell run.
+# A leftover process holds the old socket and authstate2 cookie,
+# which causes "401 bad tailscale-authstate2 cookie" on reconnect.
+sudo pkill -x tailscaled 2>/dev/null || true
+sleep 1
+sudo rm -f /var/lib/tailscale/tailscaled.state
+sudo rm -f /run/tailscale/tailscaled.sock
+
 # Start tailscaled as root so it's consistent with `sudo tailscale up`.
-# No restart loop — a mid-auth restart invalidates the OAuth session
-# and produces "403 session expired" after the user authorizes.
+# setsid detaches it from the cell's process group so Colab's
+# cell-completion SIGHUP doesn't kill it.
+# No restart loop — a mid-auth restart invalidates the OAuth session.
 # userspace-networking avoids needing /dev/net/tun;
 # DERP relay works through Colab's restrictive NAT.
 echo "[V7] Starting tailscaled daemon (userspace + DERP relay)..."
-sudo TS_DEBUG_ALWAYS_USE_DERP=true nohup tailscaled \
+sudo TS_DEBUG_ALWAYS_USE_DERP=true setsid tailscaled \
     --tun=userspace-networking \
     --state=/var/lib/tailscale/tailscaled.state \
     --socket=/run/tailscale/tailscaled.sock \
     --port 41641 \
     > /tmp/tailscaled.log 2>&1 &
+disown
 
 sleep 3
 
@@ -262,7 +272,8 @@ CONFEOF
 
         if [ -n "$SUNSHINE_BIN" ]; then
             echo "[V7] Launching Sunshine from: $SUNSHINE_BIN"
-            $SUNSHINE_BIN --config "$SUNSHINE_CONF_DIR/sunshine.conf" &
+            setsid $SUNSHINE_BIN --config "$SUNSHINE_CONF_DIR/sunshine.conf" > /tmp/sunshine.log 2>&1 &
+            disown
             SUNSHINE_PID=$!
             echo "[V7] Sunshine launched (PID: $SUNSHINE_PID)"
             sleep 3
