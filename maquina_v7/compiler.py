@@ -215,7 +215,11 @@ STAGE_T4PACKAGES = Stage(
                 echo "[V7] Download attempt $attempt/$MAX_RETRIES..."
                 if wget -q --show-progress -O /tmp/t4packages.tar.gz "$T4PACKAGES_URL" 2>&1; then
                     echo "[V7] Download complete. Extracting (this takes a minute)..."
-                    if pigz -dc /tmp/t4packages.tar.gz | tar -xv -C / 2>&1 | tail -5; then
+                    DECOMPRESS="gzip -dc"
+                    if command -v pigz &>/dev/null; then
+                        DECOMPRESS="pigz -dc"
+                    fi
+                    if $DECOMPRESS /tmp/t4packages.tar.gz | tar -xv -C / 2>&1 | tail -5; then
                         echo "[V7] T4 packages extracted successfully."
                         rm -f /tmp/t4packages.tar.gz
                         break
@@ -265,36 +269,36 @@ STAGE_TAILSCALE = Stage(
             curl -fsSL https://tailscale.com/install.sh | sh
         fi
 
-        # Create state directory (same as V5)
-        sudo mkdir -p /var/lib/tailscale
+        # Create state and socket directories
+        sudo mkdir -p /var/lib/tailscale /run/tailscale
 
-        # Start tailscaled — V5 used TS_DEBUG_ALWAYS_USE_DERP=true with
-        # --tun=userspace-networking. This is critical for Colab because:
-        #   - userspace-networking avoids needing /dev/net/tun
-        #   - DERP relay works through Colab's restrictive NAT
+        # Start tailscaled as root so it's consistent with `sudo tailscale up`.
+        # No restart loop — a mid-auth restart invalidates the OAuth session
+        # and produces "403 session expired" after the user authorizes.
+        # userspace-networking avoids needing /dev/net/tun;
+        # DERP relay works through Colab's restrictive NAT.
         echo "[V7] Starting tailscaled daemon (userspace + DERP relay)..."
-        nohup bash -c "while true; do \\
-            TS_DEBUG_ALWAYS_USE_DERP=true tailscaled \\
-                --tun=userspace-networking \\
-                --socket=/run/tailscale/tailscaled.sock \\
-                --port 41641; \\
-            sleep 1; \\
-        done" > /tmp/tailscaled.log 2>&1 &
+        sudo TS_DEBUG_ALWAYS_USE_DERP=true nohup tailscaled \\
+            --tun=userspace-networking \\
+            --state=/var/lib/tailscale/tailscaled.state \\
+            --socket=/run/tailscale/tailscaled.sock \\
+            --port 41641 \\
+            > /tmp/tailscaled.log 2>&1 &
 
         sleep 3
 
-        # Bring up the tunnel
+        # Bring up the tunnel (same user as tailscaled = root)
         echo "[V7] Bringing up Tailscale tunnel..."
         sudo tailscale up --hostname=maquina-v7 --accept-routes 2>&1 || \\
             echo "[V7] Tailscale up issued — check the auth URL above to log in."
 
         # Get the Tailscale IP (same as V5)
-        TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || echo "pending")
+        TAILSCALE_IP=$(sudo tailscale ip -4 2>/dev/null || echo "pending")
         echo "[V7] Tailscale IP: $TAILSCALE_IP"
 
         # Run netcheck (same as V5 — shows region latency info)
         echo "[V7] Running network check..."
-        tailscale netcheck 2>&1 || true
+        sudo tailscale netcheck 2>&1 || true
 
         echo "[V7] Tailscale stage complete."
     """,
@@ -357,6 +361,8 @@ CONFEOF
         if [ -z "$SUNSHINE_BIN" ]; then
             echo "[V7] WARNING: Sunshine not found in t4packages."
             echo "[V7] Installing from LizardByte PPA as fallback..."
+            sudo apt-get update -qq
+            sudo apt-get install -y software-properties-common
             sudo add-apt-repository -y ppa:lizardbyte/stable
             sudo apt-get update -qq
             sudo apt-get install -y sunshine
@@ -374,7 +380,7 @@ CONFEOF
             exit 1
         fi
 
-        TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || echo "pending")
+        TAILSCALE_IP=$(sudo tailscale ip -4 2>/dev/null || echo "pending")
 
         echo ""
         echo "[V7] ============================================"
@@ -424,7 +430,7 @@ def compile_bash() -> str:
     return "\n".join(parts)
 
 
-def save_bash(path: str = "colab_maquna_v7.sh") -> str:
+def save_bash(path: str = "maquina_v7/colab_maquna_v7.sh") -> str:
     content = compile_bash()
     with open(path, "w") as f:
         f.write(content)
