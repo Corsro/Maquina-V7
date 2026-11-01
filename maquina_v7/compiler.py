@@ -6,64 +6,35 @@ Faithful recreation of Maquina V5 (kmille36/Colab-Cloud-Gaming) with all
 bugs that caused V5 to fail on current Google Colab runtimes (2026.01+)
 fixed.
 
-=== V5 ARCHITECTURE (extracted from binary analysis) ===
-
-V5 had 3 stages:
-  1. ColabSteam ELF binary -> self-decrypts -> runs shell one-liner:
-     [ -d /content ] && nvidia-smi > /dev/null 2>&1 && pip install pycryptodome
-     && wget bit.ly/4dEMfB8 -> python3 stage2.py
-
-  2. Stage2 Python (pyobfuscate encrypted) ran these shell commands:
-     - wget t4packages.tar.gz (855MB: Steam+Sunshine+Xvfb+audio, all pre-built)
-       from github.com/kmille36/Colab-Cloud-Gaming/releases/download/1.0.0
-     - piped through pigz -dc | tar -xv -C /
-     - Set PATH to include /usr/games:/usr/lib/games
-     - Downloaded tailscale_1.84.0 from pkgs.tailscale.com
-     - Started tailscaled with --tun=userspace-networking + DERP relay
-     - tailscale up -> tailscale ip -4 -> tailscale netcheck
-
-  3. colab-moonweb: web-based Moonlight client for browser play
-     moon-pair.sh: automated PIN pairing via Sunshine API
-
-=== V5 BUGS (5 root causes) ===
+=== V5 BUGS (6 root causes) ===
 
 Bug 1: nvidia-smi PATH check too strict
-  V5: nvidia-smi > /dev/null 2>&1
-  On current Colab (2026.01, Ubuntu 22.04.5), nvidia-smi may be at
-  /usr/lib/nvidia-utils/bin/nvidia-smi or /opt/nvidia/bin/nvidia-smi
-  depending on driver version. If not in PATH, the ENTIRE pipeline
-  aborts with "Error: Please run on Google Colab with NVIDIA GPU."
-  even though a GPU IS connected and working.
-  FIX: Probe all known nvidia-smi locations + /proc/driver/nvidia.
-
 Bug 2: bit.ly short links can die
-  V5: wget -q -O /tmp/$name https://bit.ly/4dEMfB8
-  bit.ly is a third-party redirect service. If bit.ly goes down, changes
-  policy, or the link gets flagged, the stage2 script can't be downloaded
-  and everything fails silently.
-  FIX: No short links. All URLs are direct GitHub raw URLs.
-
-Bug 3: tailscale version hardcoded to 1.84.0
-  V5: curl -L https://pkgs.tailscale.com/stable/tailscale_1.84.0_amd64.tgz
-  Pinned versions go stale and may have compat issues with newer Colab
-  networking stacks.
-  FIX: Use official install script (always latest compatible version).
-
+Bug 3: Tailscale version hardcoded to 1.84.0
 Bug 4: pyobfuscate.com dependency
-  V5's stage2 was encrypted with pyobfuscate.com, requiring pycryptodome
-  and a working connection to pyobfuscate's servers to decrypt.
-  FIX: V7 is plain readable Python. No obfuscation, no external dependency.
-
 Bug 5: 855MB download with no retry
-  V5: wget -qO- <url> | pigz -dc | tar -xv -C /
-  A single wget with no retry. On slow Colab regions (asia-south1),
-  this can timeout or get rate-limited by GitHub.
-  FIX: Retry loop with progress display.
+Bug 6: No region awareness
 
-Bug 6 (region): No region awareness
-  V5 ran tailscale netcheck but didn't act on results. Users in
-  asia-south1 had no warning about latency.
-  FIX: V7 logs region and displays latency info.
+=== V7 INTERNAL BUGS (found in deep audit, 16 additional) ===
+
+Bug 7:  No Xvfb virtual display started — Sunshine crashes on launch
+Bug 8:  No PulseAudio audio sink — silent gameplay
+Bug 9:  Sunshine killed on script exit (no setsid before backgrounding)
+Bug 10: Duplicate tailscaled on re-run (now: pkill + clean state)
+Bug 11: tailscale up blocks forever (no timeout)
+Bug 12: Tailscale install failure unchecked
+Bug 13: sudo env var not propagated (TS_DEBUG_ALWAYS_USE_DERP)
+Bug 14: No Steam backup restore code despite README claims
+Bug 15: Sunshine config mono audio + conflicting bitrate/qp
+Bug 16: No extraction verification before proceeding
+Bug 17: Sunshine launch not verified (port 47990)
+Bug 18: PIN JSON injection in pair_moonlight.sh
+Bug 19: Credentials POST unchecked in pair_moonlight.sh
+Bug 20: Google Drive path inflexible (MyDrive vs My Drive)
+Bug 21: backup_steam.sh hides tar errors
+Bug 22: compiler.py docstring said 5 bugs, listed 6
+Bug 23: Sunshine PPA fallback doesn't work on Colab (no systemd)
+Bug 24: Sunshine failure kills entire cell with exit 1
 """
 
 import textwrap
@@ -85,8 +56,6 @@ class Stage:
 
 # ---------------------------------------------------------------------------
 # Stage 1: GPU detection (fixes V5 bug #1)
-# V5: nvidia-smi > /dev/null 2>&1  (aborts if not in PATH)
-# V7: probes all known nvidia-smi locations + /proc/driver/nvidia fallback
 # ---------------------------------------------------------------------------
 
 STAGE_GPU_DETECT = Stage(
@@ -108,12 +77,10 @@ STAGE_GPU_DETECT = Stage(
             fi
         done
 
-        # Fall back to PATH lookup
         if [ -z "$NVIDIA_SMI" ]; then
             NVIDIA_SMI=$(command -v nvidia-smi 2>/dev/null)
         fi
 
-        # V5 skipped this: check /proc/driver/nvidia as last resort
         if [ -z "$NVIDIA_SMI" ] && [ -d /proc/driver/nvidia ]; then
             echo "[V7] nvidia-smi binary not found, but /proc/driver/nvidia exists"
             echo "[V7] GPU driver is loaded — attempting modprobe to expose utilities"
@@ -126,14 +93,11 @@ STAGE_GPU_DETECT = Stage(
             echo "[V7] ERROR: No NVIDIA GPU detected."
             echo "[V7] Please verify your Colab runtime is set to GPU (T4)."
             echo "[V7] Menu: Runtime -> Change runtime type -> T4 GPU"
-            echo "[V7] If you already have a GPU, this is V5 bug #1 —"
-            echo "[V7] the binary was at a path V5 didn't check."
             exit 1
         fi
 
         echo "[V7] Found nvidia-smi at: $NVIDIA_SMI"
 
-        # Query GPU info (V5 just checked exit code; V7 shows the user)
         GPU_NAME=$($NVIDIA_SMI --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
         GPU_DRIVER=$($NVIDIA_SMI --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)
 
@@ -145,7 +109,6 @@ STAGE_GPU_DETECT = Stage(
             echo "[V7] Continuing anyway — GPU may still be usable."
         fi
 
-        # Link to /usr/sbin for tools in t4packages that expect it there
         ln -sf "$NVIDIA_SMI" /usr/sbin/nvidia-smi 2>/dev/null || true
 
         echo "[V7] GPU detection complete."
@@ -153,7 +116,7 @@ STAGE_GPU_DETECT = Stage(
 )
 
 # ---------------------------------------------------------------------------
-# Stage 2: Region check (new in V7 — fixes V5 bug #6)
+# Stage 2: Region check (fixes V5 bug #6)
 # ---------------------------------------------------------------------------
 
 STAGE_REGION_CHECK = Stage(
@@ -190,9 +153,8 @@ except:
 )
 
 # ---------------------------------------------------------------------------
-# Stage 3: Download t4packages (fixes V5 bug #5 — 855MB with no retry)
-# V5: wget -qO- <url> | pigz -dc | tar -xv -C /
-# V7: retry loop with progress, idempotent (skip if already extracted)
+# Stage 3: Download t4packages (fixes V5 bug #5)
+# Also: extraction verification (bug #16) + backup restore (bug #14)
 # ---------------------------------------------------------------------------
 
 STAGE_T4PACKAGES = Stage(
@@ -201,12 +163,8 @@ STAGE_T4PACKAGES = Stage(
     commands="""
         echo "[V7] Downloading T4 gaming packages (855MB pre-built)..."
 
-        # V5 used a single wget with no retry. On asia-south1 this can
-        # timeout or get rate-limited by GitHub. V7 retries up to 3 times.
-
         T4PACKAGES_URL="https://github.com/kmille36/Colab-Cloud-Gaming/releases/download/1.0.0/t4packages.tar.gz"
 
-        # Skip if already extracted (idempotent re-runs)
         if [ -d /usr/games ] && [ -f /usr/games/sunshine ]; then
             echo "[V7] T4 packages already extracted — skipping download."
         else
@@ -237,6 +195,34 @@ STAGE_T4PACKAGES = Stage(
             done
         fi
 
+        # Verify critical files were extracted before proceeding (bug #16)
+        if [ ! -f /usr/games/sunshine ]; then
+            echo "[V7] ERROR: Extraction completed but /usr/games/sunshine is missing."
+            echo "[V7] The t4packages archive may be corrupted. Re-run to retry."
+            exit 1
+        fi
+        echo "[V7] Verified: /usr/games/sunshine exists."
+
+        # Restore Steam backup from Google Drive if one exists (bug #14)
+        DRIVE_MOUNT="/content/drive"
+        BACKUP_FILE=""
+        if [ -d "$DRIVE_MOUNT/MyDrive" ]; then
+            BACKUP_FILE="$DRIVE_MOUNT/MyDrive/maquina_v7_backup.tar.gz"
+        elif [ -d "$DRIVE_MOUNT/My Drive" ]; then
+            BACKUP_FILE="$DRIVE_MOUNT/My Drive/maquina_v7_backup.tar.gz"
+        fi
+        if [ -n "$BACKUP_FILE" ] && [ -f "$BACKUP_FILE" ]; then
+            echo "[V7] Found Steam backup at $BACKUP_FILE — restoring..."
+            mkdir -p "$HOME/.steam/steam"
+            if tar -xzf "$BACKUP_FILE" -C "$HOME/.steam/steam" 2>/dev/null; then
+                echo "[V7] Steam backup restored successfully."
+            else
+                echo "[V7] WARNING: Steam backup restore failed — continuing with fresh install."
+            fi
+        else
+            echo "[V7] No Steam backup found — starting with fresh install."
+        fi
+
         # Set up PATH (identical to V5)
         echo -e '#!/bin/sh\\nexport PATH="$PATH:/usr/games:/usr/lib/games"' | \\
             sudo tee /etc/profile.d/custom_path.sh > /dev/null && \\
@@ -249,10 +235,8 @@ STAGE_T4PACKAGES = Stage(
 )
 
 # ---------------------------------------------------------------------------
-# Stage 4: Tailscale (fixes V5 bug #3 — hardcoded version)
-# V5: curl -L https://pkgs.tailscale.com/stable/tailscale_1.84.0_amd64.tgz
-# V7: official install script (always latest compatible version)
-# Also fixes V5's tailscaled invocation to match V5's DERP relay mode.
+# Stage 4: Tailscale (fixes V5 bug #3)
+# Also: install check (#12), env var fix (#13), timeout (#11)
 # ---------------------------------------------------------------------------
 
 STAGE_TAILSCALE = Stage(
@@ -261,15 +245,17 @@ STAGE_TAILSCALE = Stage(
     commands="""
         echo "[V7] Installing Tailscale..."
 
-        # V5 hardcoded tailscale_1.84.0. V7 uses the official install script
-        # which always fetches the latest version compatible with the runtime.
         if command -v tailscale &>/dev/null; then
             echo "[V7] Tailscale already installed — skipping."
         else
             curl -fsSL https://tailscale.com/install.sh | sh
+            if ! command -v tailscale &>/dev/null; then
+                echo "[V7] ERROR: Tailscale installation failed."
+                echo "[V7] Check your internet connection and try again."
+                exit 1
+            fi
         fi
 
-        # Create state and socket directories
         sudo mkdir -p /var/lib/tailscale /run/tailscale
 
         # Kill any stale tailscaled from a previous cell run.
@@ -280,14 +266,11 @@ STAGE_TAILSCALE = Stage(
         sudo rm -f /var/lib/tailscale/tailscaled.state
         sudo rm -f /run/tailscale/tailscaled.sock
 
-        # Start tailscaled as root so it's consistent with `sudo tailscale up`.
-        # setsid detaches it from the cell's process group so Colab's
-        # cell-completion SIGHUP doesn't kill it.
-        # No restart loop — a mid-auth restart invalidates the OAuth session.
-        # userspace-networking avoids needing /dev/net/tun;
-        # DERP relay works through Colab's restrictive NAT.
+        # Start tailscaled as root. setsid detaches it from the cell's
+        # process group so Colab's cell-completion SIGHUP doesn't kill it.
+        # Use `sudo env` so TS_DEBUG_ALWAYS_USE_DERP propagates (bug #13).
         echo "[V7] Starting tailscaled daemon (userspace + DERP relay)..."
-        sudo TS_DEBUG_ALWAYS_USE_DERP=true setsid tailscaled \\
+        sudo env TS_DEBUG_ALWAYS_USE_DERP=true setsid tailscaled \\
             --tun=userspace-networking \\
             --state=/var/lib/tailscale/tailscaled.state \\
             --socket=/run/tailscale/tailscaled.sock \\
@@ -297,16 +280,14 @@ STAGE_TAILSCALE = Stage(
 
         sleep 3
 
-        # Bring up the tunnel (same user as tailscaled = root)
+        # Use --timeout so it doesn't block forever (bug #11)
         echo "[V7] Bringing up Tailscale tunnel..."
-        sudo tailscale up --hostname=maquina-v7 --accept-routes 2>&1 || \\
-            echo "[V7] Tailscale up issued — check the auth URL above to log in."
+        sudo tailscale up --hostname=maquina-v7 --accept-routes --timeout=60s 2>&1 || \\
+            echo "[V7] Tailscale up issued — if not authenticated, check the auth URL above to log in."
 
-        # Get the Tailscale IP (same as V5)
         TAILSCALE_IP=$(sudo tailscale ip -4 2>/dev/null || echo "pending")
         echo "[V7] Tailscale IP: $TAILSCALE_IP"
 
-        # Run netcheck (same as V5 — shows region latency info)
         echo "[V7] Running network check..."
         sudo tailscale netcheck 2>&1 || true
 
@@ -316,8 +297,9 @@ STAGE_TAILSCALE = Stage(
 
 # ---------------------------------------------------------------------------
 # Stage 5: Sunshine launch
-# V5's t4packages includes a pre-built Sunshine. We locate and launch it.
-# V7 also writes a headless config with NVENC encoder for T4 GPU.
+# Fixes: Xvfb (#7), PulseAudio (#8), nohup/setsid (#9), config (#15),
+#        binary search, .deb fallback not PPA (#23), non-fatal failure (#24),
+#        port verification (#17)
 # ---------------------------------------------------------------------------
 
 STAGE_SUNSHINE = Stage(
@@ -330,6 +312,8 @@ STAGE_SUNSHINE = Stage(
         mkdir -p "$SUNSHINE_CONF_DIR"
 
         # Write Sunshine config for headless T4 streaming
+        # channels: 2 = stereo (bug #15 fixed from mono)
+        # Removed conflicting qp — use bitrate mode only (bug #15)
         cat > "$SUNSHINE_CONF_DIR/sunshine.conf" << 'CONFEOF'
 {
     "origin_web_ui_allowed": "wan",
@@ -338,9 +322,8 @@ STAGE_SUNSHINE = Stage(
     "external_ip": "auto",
     "hostname": "Maquina-V7",
     "min_log_level": 2,
-    "channels": 1,
+    "channels": 2,
     "fec_percentage": 20,
-    "qp": 28,
     "bitrate": 10000,
     "resolutions": [
         {"width": 1920, "height": 1080, "refreshRate": 60},
@@ -352,43 +335,123 @@ STAGE_SUNSHINE = Stage(
 CONFEOF
 
         # Locate Sunshine binary from t4packages
+        # Check file existence (not just -x) since permissions may not be set
         SUNSHINE_BIN=""
         for candidate in \\
             /usr/games/sunshine \\
             /usr/local/bin/sunshine \\
             /opt/sunshine/sunshine \\
-            /usr/bin/sunshine; do
-            if [ -x "$candidate" ]; then
+            /usr/bin/sunshine \\
+            /usr/lib/games/sunshine \\
+            /usr/lib/sunshine/sunshine \\
+            /opt/sunshine/bin/sunshine; do
+            if [ -f "$candidate" ]; then
+                chmod +x "$candidate" 2>/dev/null || true
                 SUNSHINE_BIN="$candidate"
+                echo "[V7] Found Sunshine binary at: $SUNSHINE_BIN"
                 break
             fi
         done
 
         if [ -z "$SUNSHINE_BIN" ]; then
             SUNSHINE_BIN=$(command -v sunshine 2>/dev/null)
+            if [ -n "$SUNSHINE_BIN" ]; then
+                echo "[V7] Found Sunshine in PATH: $SUNSHINE_BIN"
+            fi
         fi
 
+        # Fallback: download Sunshine .deb directly from LizardByte GitHub releases
+        # (PPA doesn't work on Colab — no systemd, add-apt-repository unreliable) (bug #23)
         if [ -z "$SUNSHINE_BIN" ]; then
-            echo "[V7] WARNING: Sunshine not found in t4packages."
-            echo "[V7] Installing from LizardByte PPA as fallback..."
-            sudo apt-get update -qq
-            sudo apt-get install -y software-properties-common
-            sudo add-apt-repository -y ppa:lizardbyte/stable
-            sudo apt-get update -qq
-            sudo apt-get install -y sunshine
-            SUNSHINE_BIN=$(command -v sunshine 2>/dev/null)
+            echo "[V7] Sunshine not found in t4packages — downloading from LizardByte GitHub..."
+            SUNSHINE_DEB="/tmp/sunshine.deb"
+            for deb_url in \\
+                "https://github.com/LizardByte/Sunshine/releases/latest/download/sunshine-ubuntu-22.04-amd64.deb" \\
+                "https://github.com/LizardByte/Sunshine/releases/latest/download/sunshine-ubuntu-20.04-amd64.deb"; do
+                echo "[V7] Trying: $deb_url"
+                if wget -q --show-progress -O "$SUNSHINE_DEB" "$deb_url" 2>&1; then
+                    echo "[V7] Downloaded. Installing (resolving dependencies)..."
+                    sudo apt-get update -qq
+                    if sudo dpkg -i "$SUNSHINE_DEB" 2>&1; then
+                        SUNSHINE_BIN=$(command -v sunshine 2>/dev/null)
+                        if [ -z "$SUNSHINE_BIN" ]; then
+                            SUNSHINE_BIN=$(dpkg -L sunshine 2>/dev/null | grep -E '/sunshine$' | head -1)
+                        fi
+                    else
+                        echo "[V7] dpkg had dependency issues — attempting to fix..."
+                        sudo apt-get install -f -y 2>&1
+                        SUNSHINE_BIN=$(command -v sunshine 2>/dev/null)
+                        if [ -z "$SUNSHINE_BIN" ]; then
+                            SUNSHINE_BIN=$(dpkg -L sunshine 2>/dev/null | grep -E '/sunshine$' | head -1)
+                        fi
+                    fi
+                    rm -f "$SUNSHINE_DEB"
+                    if [ -n "$SUNSHINE_BIN" ]; then
+                        echo "[V7] Sunshine installed from .deb: $SUNSHINE_BIN"
+                        break
+                    fi
+                fi
+            done
+        fi
+
+        # Non-fatal: warn and skip instead of exit 1 (bug #24)
+        if [ -z "$SUNSHINE_BIN" ]; then
+            echo "[V7] WARNING: Could not find or install Sunshine."
+            echo "[V7] The t4packages may not include Sunshine for this runtime,"
+            echo "[V7] and the direct .deb download failed."
+            echo "[V7] You can install Sunshine manually and re-run this cell."
+            echo "[V7] Skipping Sunshine launch — other stages completed successfully."
         fi
 
         if [ -n "$SUNSHINE_BIN" ]; then
+            # Start Xvfb virtual display (bug #7 — Sunshine needs an X display)
+            echo "[V7] Starting Xvfb virtual display on :0..."
+            if pgrep -x Xvfb >/dev/null 2>&1; then
+                echo "[V7] Xvfb already running — reusing."
+            else
+                setsid Xvfb :0 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset > /tmp/xvfb.log 2>&1 &
+                disown
+                sleep 2
+            fi
+            export DISPLAY=:0
+
+            # Start PulseAudio for audio capture (bug #8 — Sunshine needs an audio sink)
+            echo "[V7] Starting PulseAudio for audio streaming..."
+            if pgrep -x pulseaudio >/dev/null 2>&1; then
+                echo "[V7] PulseAudio already running — reusing."
+            else
+                pulseaudio --start --disallow-exit --exit-idle-time=-1 2>/dev/null || \\
+                    (sudo apt-get install -y pulseaudio >/dev/null 2>&1 && pulseaudio --start --disallow-exit --exit-idle-time=-1)
+                sleep 1
+            fi
+
+            # Launch Sunshine with setsid so it survives script exit (bug #9)
             echo "[V7] Launching Sunshine from: $SUNSHINE_BIN"
             setsid $SUNSHINE_BIN --config "$SUNSHINE_CONF_DIR/sunshine.conf" > /tmp/sunshine.log 2>&1 &
             disown
             SUNSHINE_PID=$!
             echo "[V7] Sunshine launched (PID: $SUNSHINE_PID)"
-            sleep 3
-        else
-            echo "[V7] ERROR: Could not find or install Sunshine."
-            exit 1
+
+            # Wait for Sunshine to bind to port 47990 (bug #17)
+            echo "[V7] Waiting for Sunshine web UI to start..."
+            SUNSHINE_READY=false
+            for i in $(seq 1 15); do
+                if curl -sk --connect-timeout 2 https://localhost:47990/ >/dev/null 2>&1; then
+                    SUNSHINE_READY=true
+                    break
+                fi
+                sleep 1
+            done
+
+            if [ "$SUNSHINE_READY" = false ]; then
+                echo "[V7] WARNING: Sunshine did not bind to port 47990 within 15 seconds."
+                echo "[V7] Check /tmp/sunshine.log for errors. Common issues:"
+                echo "[V7]   - Missing CUDA/NVENC libraries (check nvidia-smi works)"
+                echo "[V7]   - Xvfb not started correctly"
+                echo "[V7]   - Sunshine binary incompatible with this runtime"
+            else
+                echo "[V7] Sunshine web UI is ready on port 47990."
+            fi
         fi
 
         TAILSCALE_IP=$(sudo tailscale ip -4 2>/dev/null || echo "pending")
@@ -420,7 +483,7 @@ def compile_bash() -> str:
     parts = [
         "#!/bin/bash",
         "# Maquina V7 - Auto-generated deployment script",
-        "# Faithful recreation of V5 with all 6 bugs fixed.",
+        "# Faithful recreation of V5 with all bugs fixed.",
         "# Do not edit manually — modify stages in compiler.py and regenerate.",
         "",
         "set -uo pipefail",

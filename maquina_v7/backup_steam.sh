@@ -7,7 +7,17 @@
 # that saves your entire Steam install to Google Drive.
 
 DRIVE_MOUNT="/content/drive"
-BACKUP_FILE="$DRIVE_MOUNT/MyDrive/maquina_v7_backup.tar.gz"
+# Colab may mount as either "MyDrive" or "My Drive" depending on version
+if [ -d "$DRIVE_MOUNT/MyDrive" ]; then
+    DRIVE_ROOT="$DRIVE_MOUNT/MyDrive"
+elif [ -d "$DRIVE_MOUNT/My Drive" ]; then
+    DRIVE_ROOT="$DRIVE_MOUNT/My Drive"
+else
+    echo "[V7] ERROR: Google Drive not mounted at $DRIVE_MOUNT"
+    echo "[V7] Run: from google.colab import drive; drive.mount('/content/drive')"
+    exit 1
+fi
+BACKUP_FILE="$DRIVE_ROOT/maquina_v7_backup.tar.gz"
 STEAM_INSTALL_DIR="$HOME/.steam/steam"
 
 if [ ! -d "$STEAM_INSTALL_DIR" ]; then
@@ -16,18 +26,12 @@ if [ ! -d "$STEAM_INSTALL_DIR" ]; then
     exit 1
 fi
 
-if [ ! -d "$DRIVE_MOUNT/MyDrive" ]; then
-    echo "[V7] ERROR: Google Drive not mounted at $DRIVE_MOUNT"
-    echo "[V7] Run: from google.colab import drive; drive.mount('/content/drive')"
-    exit 1
-fi
-
 echo "[V7] Creating Steam backup..."
 echo "[V7] Source:      $STEAM_INSTALL_DIR"
 echo "[V7] Destination: $BACKUP_FILE"
 echo "[V7] This may take several minutes depending on game sizes..."
 
-tar -czf "$BACKUP_FILE" -C "$STEAM_INSTALL_DIR" . 2>/dev/null
+tar -czf "$BACKUP_FILE" -C "$STEAM_INSTALL_DIR" . 2>&1
 
 if [ $? -eq 0 ]; then
     SIZE=$(du -sh "$BACKUP_FILE" 2>/dev/null | cut -f1)

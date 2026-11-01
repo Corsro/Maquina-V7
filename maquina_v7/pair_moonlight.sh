@@ -28,16 +28,24 @@ fi
 
 echo "[V7] Sunshine is running. Setting default credentials..."
 
-curl -u admin:admin -X POST -k https://localhost:47990/api/password \
+cred_response=$(curl -u admin:admin -X POST -k https://localhost:47990/api/password \
     -H "Content-Type: application/json" \
     -d '{"currentUsername":"admin","currentPassword":"admin","newUsername":"admin","newPassword":"admin","confirmNewPassword":"admin"}' \
-    2>/dev/null
+    -w "\n%{http_code}" 2>/dev/null)
+
+cred_code=$(echo "$cred_response" | tail -1)
+if [ "$cred_code" != "200" ] && [ "$cred_code" != "201" ]; then
+    echo "[V7] WARNING: Credential setup returned HTTP $cred_code (may already be set)."
+fi
 
 echo "[V7] Submitting PIN: $pin"
 
+# Escape PIN for JSON safety (prevents JSON injection from malformed input)
+esc_pin=$(printf '%s' "$pin" | sed 's/\\/\\\\\\\\/g; s/"/\\\\"/g')
+
 response=$(curl -u admin:admin -X POST -k https://localhost:47990/api/pin \
     -H "Content-Type: application/json" \
-    -d "{\"pin\":\"$pin\",\"name\":\"moonlight\"}" \
+    -d "{\"pin\":\"$esc_pin\",\"name\":\"moonlight\"}" \
     -w "\n%{http_code}" 2>/dev/null)
 
 http_code=$(echo "$response" | tail -1)
